@@ -5,50 +5,18 @@ from collections import deque
 from typing import Any, TypeAlias
 import numpy as np
 import math
-import statistics as st
+from statistics import NormalDist
 
 
 from datamodel import Order, OrderDepth, Symbol, TradingState
 
 JSON: TypeAlias = dict[str, "JSON"] | list["JSON"] | str | int | float | bool | None
 
-class Strategy:
-    def __init__(self, symbol: str, limit: int) -> None:
-        self.symbol = symbol
-        self.limit = limit
-
-    @abstractmethod
-    def act(self, state: TradingState) -> None:
-        raise NotImplementedError()
-
-    def run(self, state: TradingState) -> tuple[list[Order], int]:
-        self.orders: list[Order] = []
-        self.conversions = 0
-
-        self.act(state)
-
-        return self.orders, self.conversions
-
-    def buy(self, price: int, quantity: int) -> None:
-        self.orders.append(Order(self.symbol, price, quantity))
-
-    def sell(self, price: int, quantity: int) -> None:
-        self.orders.append(Order(self.symbol, price, -quantity))
-
-    def convert(self, amount: int) -> None:
-        self.conversions += amount
-
-    def save(self) -> JSON:
-        return None
-
-    def load(self, data: JSON) -> None:
-        pass
-
 def BS_CALL(S, K, T, r, sigma):
     d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
     d2 = d1 - sigma * np.sqrt(T)
 
-    normal = st.NormalDist(mu=0.0, sigma=1.0)
+    normal = NormalDist(mu=0.0, sigma=1.0)
 
     call = (S * normal.cdf(d1)) - (K * np.exp(-r * T) * normal.cdf(d2))
     return call
@@ -56,7 +24,7 @@ def BS_CALL(S, K, T, r, sigma):
 def VEGA(S, K, T, r, sigma):
     d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
     # Standard normal PDF for Vega
-    return S * np.sqrt(T) * st.NormalDist(0, 1).pdf(d1)
+    return S * np.sqrt(T) * NormalDist(0, 1).pdf(d1)
 
 def IV(target_price, S, K, T, r, low=0.001, high=5.0):
     low, high = 0.0001, 5.0
@@ -90,19 +58,95 @@ def IV(target_price, S, K, T, r, low=0.001, high=5.0):
 
     return sigma
 
-class Trader:
-    def bid(self):
-        return 5
+class Strategy:
+    def __init__(self, symbol: str, limit: int) -> None:
+        self.symbol = symbol
+        self.limit = limit
 
+    @abstractmethod
+    def act(self, state: TradingState) -> None:
+        raise NotImplementedError()
+
+    def run(self, state: TradingState) -> tuple[list[Order], int]:
+        self.orders: list[Order] = []
+        self.conversions = 0
+
+        self.act(state)
+
+        return self.orders, self.conversions
+
+    def buy(self, price: int, quantity: int) -> None:
+        self.orders.append(Order(self.symbol, price, quantity))
+
+    def sell(self, price: int, quantity: int) -> None:
+        self.orders.append(Order(self.symbol, price, -quantity))
+
+    def convert(self, amount: int) -> None:
+        self.conversions += amount
+
+    def save(self) -> JSON:
+        return None
+
+    def load(self, data: JSON) -> None:
+        pass
+
+class HydrogelPackStrategy(Strategy):
+    def __init__(self, symbol: Symbol, limit: int) -> None:
+        super().__init__(symbol, limit)
+
+    def act(self, state: TradingState) -> None:
+        order_depth = state.order_depths[self.symbol]
+        pass
+
+    def save(self) -> JSON:
+        return None
+
+    def load(self, data: JSON) -> None:
+        pass
+
+
+class VelvetFruitExtractStrategy(Strategy):
+    def __init__(self, symbol: Symbol, limit: int) -> None:
+        super().__init__(symbol, limit)
+
+    def act(self, state: TradingState) -> None:
+        order_depth = state.order_depths[self.symbol]
+        pass
+
+    def save(self) -> JSON:
+        return None
+
+    def load(self, data: JSON) -> None:
+        pass
+
+
+class VelvetFruitExtractVoucherStrategy(Strategy):
+    def __init__(self, symbol: Symbol, limit: int) -> None:
+        super().__init__(symbol, limit)
+
+    def act(self, state: TradingState) -> None:
+        order_depth = state.order_depths[self.symbol]
+        pass
+
+    def save(self) -> JSON:
+        return None
+
+    def load(self, data: JSON) -> None:
+        pass
+
+
+class Trader:
     def __init__(self) -> None:
         limits = {
-            "ASH_COATED_OSMIUM": 80,
-            "INTARIAN_PEPPER_ROOT": 80,
+            "HYDROGEL_PACK": 200,
+            "VELVETFRUIT_EXTRACT": 200,
+            "VELVETFRUIT_EXTRACT_VOUCHER": 300,
         }
 
         self.strategies: dict[Symbol, Strategy] = {symbol: clazz(symbol, limits[symbol]) for symbol, clazz in {
-            "ASH_COATED_OSMIUM": AshCoatedOsmiumStrategy,
-            "INTARIAN_PEPPER_ROOT": IntarianPepperRootStrategy,
+            "HYDROGEL_PACK": HydrogelPackStrategy,
+            "VELVETFRUIT_EXTRACT": VelvetFruitExtractStrategy,
+            "VELVETFRUIT_EXTRACT_VOUCHER": VelvetFruitExtractVoucherStrategy,
         }.items()}
 
     def run(self, state: TradingState) -> tuple[dict[Symbol, list[Order]], int, str]:
