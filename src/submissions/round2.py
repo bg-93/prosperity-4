@@ -47,7 +47,7 @@ class AshCoatedOsmiumStrategy(Strategy):
         super().__init__(symbol, limit)
         self.mid_history:Any = deque(maxlen = 20)
 
-    def actBest(self, state: TradingState) -> None:
+    def act(self, state: TradingState) -> None:
         order_depth = state.order_depths[self.symbol]
         buy_orders = sorted(order_depth.buy_orders.items(), reverse=True)   # highest bid first
         sell_orders = sorted(order_depth.sell_orders.items())               # lowest ask first
@@ -165,7 +165,7 @@ class AshCoatedOsmiumStrategy(Strategy):
             if ask_size > 0:
                 self.sell(ask_quote, ask_size)
 
-    def act(self,state:TradingState) -> None:
+    def actWorse(self,state:TradingState) -> None:
         order_depth = state.order_depths[self.symbol]
         buy_orders = sorted(order_depth.buy_orders.items(), reverse=True)
         sell_orders = sorted(order_depth.sell_orders.items())
