@@ -1,0 +1,129 @@
+import json
+from typing import cast
+from abc import abstractmethod
+from collections import deque
+from typing import Any, TypeAlias
+import numpy as np
+import math
+import statistics as st
+
+
+from datamodel import Order, OrderDepth, Symbol, TradingState
+
+JSON: TypeAlias = dict[str, "JSON"] | list["JSON"] | str | int | float | bool | None
+
+class Strategy:
+    def __init__(self, symbol: str, limit: int) -> None:
+        self.symbol = symbol
+        self.limit = limit
+
+    @abstractmethod
+    def act(self, state: TradingState) -> None:
+        raise NotImplementedError()
+
+    def run(self, state: TradingState) -> tuple[list[Order], int]:
+        self.orders: list[Order] = []
+        self.conversions = 0
+
+        self.act(state)
+
+        return self.orders, self.conversions
+
+    def buy(self, price: int, quantity: int) -> None:
+        self.orders.append(Order(self.symbol, price, quantity))
+
+    def sell(self, price: int, quantity: int) -> None:
+        self.orders.append(Order(self.symbol, price, -quantity))
+
+    def convert(self, amount: int) -> None:
+        self.conversions += amount
+
+    def save(self) -> JSON:
+        return None
+
+    def load(self, data: JSON) -> None:
+        pass
+
+def BS_CALL(S, K, T, r, sigma):
+    d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
+    d2 = d1 - sigma * np.sqrt(T)
+
+    normal = st.NormalDist(mu=0.0, sigma=1.0)
+
+    call = (S * normal.cdf(d1)) - (K * np.exp(-r * T) * normal.cdf(d2))
+    return call
+
+def VEGA(S, K, T, r, sigma):
+    d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
+    # Standard normal PDF for Vega
+    return S * np.sqrt(T) * st.NormalDist(0, 1).pdf(d1)
+
+def IV(target_price, S, K, T, r, low=0.001, high=5.0):
+    low, high = 0.0001, 5.0
+    sigma = 0.2  # Initial guess
+
+    for _ in range(100):
+        price = BS_CALL(S, K, T, r, sigma)
+        vega = VEGA(S, K, T, r, sigma)
+
+        # 1. Check for "Poor" Vega
+        if abs(vega) < 1e-6:
+            # Fallback to Bisection step
+            if price < target_price:
+                low = sigma
+            else:
+                high = sigma
+            sigma = (low + high) / 2
+        else:
+            # 2. Proceed with Newton step
+            diff = target_price - price
+            if abs(diff) < 1e-8:
+                return sigma
+
+            new_sigma = sigma + diff / vega
+
+            # 3. Boundary Check (Stay within bounds)
+            if new_sigma <= low or new_sigma >= high:
+                sigma = (low + high) / 2 # Midpoint fallback
+            else:
+                sigma = new_sigma
+
+    return sigma
+
+class Trader:
+    def bid(self):
+        return 5
+
+    def __init__(self) -> None:
+        limits = {
+            "ASH_COATED_OSMIUM": 80,
+            "INTARIAN_PEPPER_ROOT": 80,
+        }
+
+        self.strategies: dict[Symbol, Strategy] = {symbol: clazz(symbol, limits[symbol]) for symbol, clazz in {
+            "ASH_COATED_OSMIUM": AshCoatedOsmiumStrategy,
+            "INTARIAN_PEPPER_ROOT": IntarianPepperRootStrategy,
+        }.items()}
+
+    def run(self, state: TradingState) -> tuple[dict[Symbol, list[Order]], int, str]:
+        orders = {}
+        conversions = 0
+
+        old_trader_data = json.loads(state.traderData) if state.traderData != "" else {}
+        new_trader_data = {}
+
+        for symbol, strategy in self.strategies.items():
+            if symbol in old_trader_data:
+                strategy.load(old_trader_data[symbol])
+
+            if symbol in state.order_depths:
+                strategy_orders, strategy_conversions = strategy.run(state)
+                orders[symbol] = strategy_orders
+                conversions += strategy_conversions
+
+            new_trader_data[symbol] = strategy.save()
+
+        trader_data = json.dumps(new_trader_data, separators=(",", ":"))
+
+
+        return orders, conversions, trader_data
