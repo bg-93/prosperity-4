@@ -90,6 +90,41 @@ class Strategy:
     def load(self, data: JSON) -> None:
         pass
 
+    ################HELPER#METHODS###################
+    def get_position(self, state: TradingState) -> int:
+        return state.position.get(self.symbol, 0)
+
+    def get_best_bid_ask(self, state: TradingState):
+        order_depth = state.order_depths[self.symbol]
+
+        buy_orders = sorted(order_depth.buy_orders.items(), reverse=True)
+        sell_orders = sorted(order_depth.sell_orders.items())
+
+        if not buy_orders or not sell_orders:
+            return None
+
+        best_bid, best_bid_vol = buy_orders[0]
+        best_ask, best_ask_vol = sell_orders[0]
+
+        return best_bid, best_bid_vol, best_ask, best_ask_vol
+
+    def get_mid(self, state: TradingState, symbol: Symbol | None = None) -> float | None:
+        symbol = symbol or self.symbol
+        if symbol not in state.order_depths:
+            return None
+
+        order_depth = state.order_depths[symbol]
+        buy_orders = sorted(order_depth.buy_orders.items(), reverse=True)
+        sell_orders = sorted(order_depth.sell_orders.items())
+
+        if not buy_orders or not sell_orders:
+            return None
+
+        best_bid = buy_orders[0][0]
+        best_ask = sell_orders[0][0]
+
+        return (best_bid + best_ask) / 2
+
 class HydrogelPackStrategy(Strategy):
     def __init__(self, symbol: Symbol, limit: int) -> None:
         super().__init__(symbol, limit)
@@ -121,8 +156,9 @@ class VelvetFruitExtractStrategy(Strategy):
 
 
 class VelvetFruitExtractVoucherStrategy(Strategy):
-    def __init__(self, symbol: Symbol, limit: int) -> None:
+    def __init__(self, symbol: Symbol, limit: int, strike_price: int) -> None:
         super().__init__(symbol, limit)
+        self.strike_price = strike_price
 
     def act(self, state: TradingState) -> None:
         order_depth = state.order_depths[self.symbol]
@@ -137,17 +173,21 @@ class VelvetFruitExtractVoucherStrategy(Strategy):
 
 class Trader:
     def __init__(self) -> None:
-        limits = {
-            "HYDROGEL_PACK": 200,
-            "VELVETFRUIT_EXTRACT": 200,
-            "VELVETFRUIT_EXTRACT_VOUCHER": 300,
-        }
 
-        self.strategies: dict[Symbol, Strategy] = {symbol: clazz(symbol, limits[symbol]) for symbol, clazz in {
-            "HYDROGEL_PACK": HydrogelPackStrategy,
-            "VELVETFRUIT_EXTRACT": VelvetFruitExtractStrategy,
-            "VELVETFRUIT_EXTRACT_VOUCHER": VelvetFruitExtractVoucherStrategy,
-        }.items()}
+        self.strategies: dict[Symbol, Strategy] = {
+            "HYDROGEL_PACK": HydrogelPackStrategy("HYDROGEL_PACK", 200),
+            "VELVETFRUIT_EXTRACT": VelvetFruitExtractStrategy("VELVETFRUIT_EXTRACT", 200),
+            "VEV_4000": VelvetFruitExtractVoucherStrategy("VEV_4000", 300, 4000),
+            "VEV_4500": VelvetFruitExtractVoucherStrategy("VEV_4500", 300, 4500),
+            "VEV_5000": VelvetFruitExtractVoucherStrategy("VEV_5000", 300, 5000),
+            "VEV_5100": VelvetFruitExtractVoucherStrategy("VEV_5100", 300, 5100),
+            "VEV_5200": VelvetFruitExtractVoucherStrategy("VEV_5200", 300, 5200),
+            "VEV_5300": VelvetFruitExtractVoucherStrategy("VEV_5300", 300, 5300),
+            "VEV_5400": VelvetFruitExtractVoucherStrategy("VEV_5400", 300, 5400),
+            "VEV_5500": VelvetFruitExtractVoucherStrategy("VEV_5500", 300, 5500),
+            "VEV_6000": VelvetFruitExtractVoucherStrategy("VEV_6000", 300, 6000),
+            "VEV_6500": VelvetFruitExtractVoucherStrategy("VEV_6500", 300, 6500),
+        }
 
     def run(self, state: TradingState) -> tuple[dict[Symbol, list[Order]], int, str]:
         orders = {}
