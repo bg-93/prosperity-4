@@ -519,26 +519,26 @@ def render_inputs() -> tuple[list[pd.DataFrame], list[pd.DataFrame], str]:
     default_price_frames = list(load_default_csvs("prices"))
     default_trade_frames = list(load_default_csvs("trades"))
 
-    price_uploads = st.file_uploader(
-        "Upload one or more `prices` CSV files",
+    price_upload = st.file_uploader(
+        "Upload a `prices` CSV file",
         type=["csv"],
-        accept_multiple_files=True,
-        help="If left empty, the app uses all files in `data/ROUND_1/prices_round_1_day_*.csv`.",
+        accept_multiple_files=False,
+        help="Uploading a new file replaces the previous prices upload. If left empty, the app uses the default Round 1 prices files.",
     )
-    trade_uploads = st.file_uploader(
-        "Upload one or more `trades` CSV files",
+    trade_upload = st.file_uploader(
+        "Upload a `trades` CSV file",
         type=["csv"],
-        accept_multiple_files=True,
-        help="If left empty, the app uses all files in `data/ROUND_1/trades_round_1_day_*.csv`.",
+        accept_multiple_files=False,
+        help="Uploading a new file replaces the previous trades upload. If left empty, the app uses the default Round 1 trades files.",
     )
 
-    if price_uploads:
-        price_frames = [read_uploaded_csv(file) for file in price_uploads]
+    if price_upload is not None:
+        price_frames = [read_uploaded_csv(price_upload)]
     else:
         price_frames = default_price_frames
 
-    if trade_uploads:
-        trade_frames = [read_uploaded_csv(file) for file in trade_uploads]
+    if trade_upload is not None:
+        trade_frames = [read_uploaded_csv(trade_upload)]
     else:
         trade_frames = default_trade_frames
 
