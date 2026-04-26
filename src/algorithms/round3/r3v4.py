@@ -12,7 +12,7 @@ from datamodel import Order, OrderDepth, Symbol, TradingState
 
 JSON: TypeAlias = dict[str, "JSON"] | list["JSON"] | str | int | float | bool | None
 
-INITIAL_DAYS_TO_EXPIRY = 6.0 #cuz 2nd day, 5 for 3rd day
+INITIAL_DAYS_TO_EXPIRY = 6.0 #cuz 3rd day
 
 DAYS_PER_YEAR = 365
 DAY_LENGTH = 1_000_000
@@ -30,14 +30,20 @@ OPTION_STRIKES: dict[Symbol, int] = {
     "VEV_6500": 6500,
 }
 
-def DELTA(S: float, K: float, T: float, r: float, sigma: float) -> float:
-    if S <= 0 or K <= 0:
-        return 0.0
-    if T <= 0 or sigma <= 0:
-        return 1.0 if S > K else 0.0
+TRADEABLE_VOUCHERS: set[Symbol] = {"VEV_5000", "VEV_5100", "VEV_5200", "VEV_5300", "VEV_5400", "VEV_5500"}
 
-    d1 = (math.log(S / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * math.sqrt(T))
-    return NormalDist(mu=0.0, sigma=1.0).cdf(d1)
+VOUCHER_EDGE_THRESHOLDS: dict[Symbol, float] = {
+    "VEV_5000": 0.015,
+    "VEV_5100": 0.015,
+    "VEV_5200": 0.017,
+    "VEV_5300": 0.021,
+    "VEV_5400": 0.026,
+    "VEV_5500": 0.010,
+}
+
+START_TRADING_TIMESTAMP = 3500
+FLATTEN_AFTER_TIMESTAMP = 58800
+SECOND_PHASE_START_TIMESTAMP = 60000
 
 def get_moneyness(S: float, K: float, T: float) -> float:
     if S <= 0 or K <= 0 or T <= 0:
@@ -181,9 +187,8 @@ class Strategy:
 class HydrogelPackStrategy(Strategy):
     def __init__(self, symbol: Symbol, limit: int) -> None:
         super().__init__(symbol, limit)
+        self.mid_history:Any = deque(maxlen = 10)
 
-        self.mid_history: deque[float] = deque(maxlen=200)
-        self.last_mid: float | None = None
 
     def act(self, state: TradingState) -> None:
         order_depth = state.order_depths[self.symbol]
@@ -331,6 +336,7 @@ class HydrogelPackStrategy(Strategy):
         if isinstance(last_mid, int | float):
             self.last_mid = float(last_mid)
 
+
 class VelvetFruitExtractStrategy(Strategy):
     def __init__(self, symbol: Symbol, limit: int) -> None:
         super().__init__(symbol, limit)
@@ -432,75 +438,48 @@ class VelvetFruitExtractVoucherStrategy(Strategy):
     def get_clip(self, vega: float) -> int:
         return 4
 
-    def hedge_delta_incremental(
-        self,
-        state: TradingState,
-        option_qty: int,
-        delta: float,
-    ) -> None:
-        """
-        option_qty > 0 means we bought calls.
-        option_qty < 0 means we sold calls.
-
-        For calls:
-        bought calls  => positive delta => sell underlying
-        sold calls    => negative delta => buy underlying
-        """
-        UNDERLYING = "VELVETFRUIT_EXTRACT"
-        UNDERLYING_LIMIT = 200
-
-        if UNDERLYING not in state.order_depths:
-            return
-
-        hedge_qty = int(round(option_qty * delta))
-
-        if hedge_qty == 0:
-            return
-
-        book = state.order_depths[UNDERLYING]
-        buy_orders = sorted(book.buy_orders.items(), reverse=True)
-        sell_orders = sorted(book.sell_orders.items())
-
-        if not buy_orders or not sell_orders:
-            return
-
-        underlying_pos = state.position.get(UNDERLYING, 0)
-
-        # If hedge_qty > 0, our option trade added positive delta,
-        # so we SELL underlying.
-        if hedge_qty > 0:
-            qty_left = min(hedge_qty, UNDERLYING_LIMIT + underlying_pos)
-
-            for bid, bid_vol in buy_orders:
-                if qty_left <= 0:
-                    break
-
-                available = bid_vol
-                qty = min(available, qty_left)
-
-                if qty > 0:
-                    self.sell_item(UNDERLYING, bid, qty)
-                    qty_left -= qty
-
-        # If hedge_qty < 0, our option trade added negative delta,
-        # so we BUY underlying.
-        elif hedge_qty < 0:
-            qty_left = min(-hedge_qty, UNDERLYING_LIMIT - underlying_pos)
-
-            for ask, ask_vol in sell_orders:
-                if qty_left <= 0:
-                    break
-
-                available = -ask_vol
-                qty = min(available, qty_left)
-
-                if qty > 0:
-                    self.buy_item(UNDERLYING, ask, qty)
-                    qty_left -= qty
-
     def act(self, state: TradingState) -> None:
         UNDERLYING = "VELVETFRUIT_EXTRACT"
         r = 0.0
+
+        if self.symbol not in TRADEABLE_VOUCHERS:
+            return
+
+        timestamp = int(getattr(state, "timestamp", 0))
+        if timestamp >= FLATTEN_AFTER_TIMESTAMP and timestamp < SECOND_PHASE_START_TIMESTAMP:
+            position = self.get_position(state)
+            if position == 0:
+                return
+
+            order_depth = state.order_depths.get(self.symbol)
+            if order_depth is None:
+                return
+
+            buy_orders = sorted(order_depth.buy_orders.items(), reverse=True)
+            sell_orders = sorted(order_depth.sell_orders.items())
+
+            if position > 0:
+                qty_left = position
+                for bid, bid_vol in buy_orders:
+                    if qty_left <= 0:
+                        break
+                    qty = min(bid_vol, qty_left)
+                    if qty > 0:
+                        self.sell(bid, qty)
+                        qty_left -= qty
+            else:
+                qty_left = -position
+                for ask, ask_vol in sell_orders:
+                    if qty_left <= 0:
+                        break
+                    qty = min(-ask_vol, qty_left)
+                    if qty > 0:
+                        self.buy(ask, qty)
+                        qty_left -= qty
+            return
+
+        if timestamp < START_TRADING_TIMESTAMP:
+            return
 
         # -----------------------------
         # 1. Get underlying mid price
@@ -526,25 +505,21 @@ class VelvetFruitExtractVoucherStrategy(Strategy):
         best_bid, best_bid_vol = buy_orders[0]
         best_ask, best_ask_vol = sell_orders[0]
 
+        option_mid = (best_bid + best_ask) / 2
+
         # -----------------------------
-        # 3. Compute executable IVs
+        # 3. Compute observed IV
         # -----------------------------
         K = float(self.strike_price)
         T = self.get_tte_years(state)
 
-        bid_iv = IV(best_bid, S, K, T, r)
-        ask_iv = IV(best_ask, S, K, T, r)
-        mid_iv = IV((best_bid + best_ask) / 2, S, K, T, r)
+        observed_iv = IV(option_mid, S, K, T, r)
 
-        if (
-            bid_iv <= 0 or ask_iv <= 0 or mid_iv <= 0
-            or not math.isfinite(bid_iv)
-            or not math.isfinite(ask_iv)
-            or not math.isfinite(mid_iv)
-        ):
+
+        if observed_iv <= 0 or not math.isfinite(observed_iv):
             return
 
-        self.iv_history.append(mid_iv)
+        self.iv_history.append(observed_iv)
 
         # -----------------------------
         # 4. Compute fair IV from smile
@@ -552,61 +527,43 @@ class VelvetFruitExtractVoucherStrategy(Strategy):
         moneyness = get_moneyness(S, K, T)
         fair_iv = self.fair_iv_from_smile(moneyness)
 
-        vega = VEGA(S, K, T, r, fair_iv)
-        delta = DELTA(S, K, T, r, fair_iv)
 
-        if vega < 0.20:
+        vega = VEGA(S, K, T, r, fair_iv)
+
+        min_vega = 0.05 if self.symbol == "VEV_5500" else 0.25
+        if vega < min_vega:
             return
 
+
+        # Positive edge means observed IV is too low, option is cheap.
+        # Negative edge means observed IV is too high, option is rich.
+        iv_edge = fair_iv - observed_iv
+
         # -----------------------------
-        # 5. Trade only executable edge
+        # 5. Trade only if edge is large enough
         # -----------------------------
-        threshold = 0.005
+        threshold = VOUCHER_EDGE_THRESHOLDS.get(self.symbol, 0.02)
 
         position = self.get_position(state)
         to_buy = self.limit - position
         to_sell = self.limit + position
 
+        vega = VEGA(S, K, T, r, observed_iv)
         max_clip = self.get_clip(vega)
 
         if max_clip <= 0:
             return
 
-        # Use the executable edge, not mid edge.
-        buy_edge = fair_iv - ask_iv
-        sell_edge = bid_iv - fair_iv
-
-        conviction = 1.0
-
-        if buy_edge > threshold:
-            conviction = min(3.0, max(1.0, buy_edge / threshold))
-        elif sell_edge > threshold:
-            conviction = min(3.0, max(1.0, sell_edge / threshold))
-
+        # Scale size with conviction, but keep it controlled.
+        conviction = min(3.0, max(1.0, abs(iv_edge) / threshold))
         target_qty = int(max_clip * conviction)
 
         # -----------------------------
-        # 6. Buy only if ask IV is cheap
+        # 6. Buy cheap IV
         # -----------------------------
-        if ask_iv < fair_iv - threshold and to_buy > 0:
-            qty_left = min(to_buy, target_qty)
+        phase_two = timestamp >= SECOND_PHASE_START_TIMESTAMP
 
-            for ask, ask_vol in sell_orders:
-                if qty_left <= 0:
-                    break
-
-                available = -ask_vol
-                qty = min(available, qty_left)
-
-                if qty > 0:
-                    self.sell(ask, qty)
-                    #self.hedge_delta_incremental(state, option_qty=-qty, delta=delta)
-                    qty_left -= qty
-
-        # -----------------------------
-        # 7. Sell only if bid IV is rich
-        # -----------------------------
-        elif bid_iv > fair_iv + threshold and to_sell > 0:
+        if ((iv_edge < -threshold) if phase_two else (iv_edge > threshold)) and to_sell > 0:
             qty_left = min(to_sell, target_qty)
 
             for bid, bid_vol in buy_orders:
@@ -617,8 +574,24 @@ class VelvetFruitExtractVoucherStrategy(Strategy):
                 qty = min(available, qty_left)
 
                 if qty > 0:
-                    self.buy(bid, qty)
-                    #self.hedge_delta_incremental(state, option_qty=qty, delta=delta)
+                    self.sell(bid, qty)
+                    qty_left -= qty
+
+        # -----------------------------
+        # 7. Sell rich IV
+        # -----------------------------
+        elif ((iv_edge > threshold) if phase_two else (iv_edge < -threshold)) and to_buy > 0:
+            qty_left = min(to_buy, target_qty)
+
+            for ask, ask_vol in sell_orders:
+                if qty_left <= 0:
+                    break
+
+                available = -ask_vol
+                qty = min(available, qty_left)
+
+                if qty > 0:
+                    self.buy(ask, qty)
                     qty_left -= qty
 
     def get_tte_years(self, state: TradingState) -> float:
@@ -649,18 +622,17 @@ class Trader:
 
         self.strategies: dict[Symbol, Strategy] = {
             "HYDROGEL_PACK": HydrogelPackStrategy("HYDROGEL_PACK", 200),
-
-            #"VEV_4000": VelvetFruitExtractVoucherStrategy("VEV_4000", 300, 4000),
-            #"VEV_4500": VelvetFruitExtractVoucherStrategy("VEV_4500", 300, 4500),
-            #"VEV_5000": VelvetFruitExtractVoucherStrategy("VEV_5000", 300, 5000),
+            "VELVETFRUIT_EXTRACT": VelvetFruitExtractStrategy("VELVETFRUIT_EXTRACT", 200),
+            "VEV_4000": VelvetFruitExtractVoucherStrategy("VEV_4000", 300, 4000),
+            "VEV_4500": VelvetFruitExtractVoucherStrategy("VEV_4500", 300, 4500),
+            "VEV_5000": VelvetFruitExtractVoucherStrategy("VEV_5000", 300, 5000),
             "VEV_5100": VelvetFruitExtractVoucherStrategy("VEV_5100", 300, 5100),
             "VEV_5200": VelvetFruitExtractVoucherStrategy("VEV_5200", 300, 5200),
-            #"VEV_5300": VelvetFruitExtractVoucherStrategy("VEV_5300", 300, 5300),
-            #"VEV_5400": VelvetFruitExtractVoucherStrategy("VEV_5400", 300, 5400),
-            #"VEV_5500": VelvetFruitExtractVoucherStrategy("VEV_5500", 300, 5500),
-            #"VEV_6000": VelvetFruitExtractVoucherStrategy("VEV_6000", 300, 6000),
-            #"VEV_6500": VelvetFruitExtractVoucherStrategy("VEV_6500", 300, 6500),
-            "VELVETFRUIT_EXTRACT": VelvetFruitExtractStrategy("VELVETFRUIT_EXTRACT", 200),
+            "VEV_5300": VelvetFruitExtractVoucherStrategy("VEV_5300", 300, 5300),
+            "VEV_5400": VelvetFruitExtractVoucherStrategy("VEV_5400", 300, 5400),
+            "VEV_5500": VelvetFruitExtractVoucherStrategy("VEV_5500", 300, 5500),
+            "VEV_6000": VelvetFruitExtractVoucherStrategy("VEV_6000", 300, 6000),
+            "VEV_6500": VelvetFruitExtractVoucherStrategy("VEV_6500", 300, 6500),
         }
 
     def run(self, state: TradingState) -> tuple[dict[Symbol, list[Order]], int, str]:
@@ -676,12 +648,7 @@ class Trader:
 
             if symbol in state.order_depths:
                 strategy_orders, strategy_conversions = strategy.run(state)
-
-                for order in strategy_orders:
-                    if order.symbol not in orders:
-                        orders[order.symbol] = []
-                    orders[order.symbol].append(order)
-
+                orders[symbol] = strategy_orders
                 conversions += strategy_conversions
 
             new_trader_data[symbol] = strategy.save()

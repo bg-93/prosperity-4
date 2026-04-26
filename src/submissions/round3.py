@@ -655,7 +655,7 @@ class Trader:
             #"VEV_5000": VelvetFruitExtractVoucherStrategy("VEV_5000", 300, 5000),
             "VEV_5100": VelvetFruitExtractVoucherStrategy("VEV_5100", 300, 5100),
             "VEV_5200": VelvetFruitExtractVoucherStrategy("VEV_5200", 300, 5200),
-            #"VEV_5300": VelvetFruitExtractVoucherStrategy("VEV_5300", 300, 5300),
+            "VEV_5300": VelvetFruitExtractVoucherStrategy("VEV_5300", 300, 5300),
             #"VEV_5400": VelvetFruitExtractVoucherStrategy("VEV_5400", 300, 5400),
             #"VEV_5500": VelvetFruitExtractVoucherStrategy("VEV_5500", 300, 5500),
             #"VEV_6000": VelvetFruitExtractVoucherStrategy("VEV_6000", 300, 6000),

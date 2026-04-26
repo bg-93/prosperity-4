@@ -1,8 +1,7 @@
 import json
 from typing import Dict, List
 from json import JSONEncoder
-import jsonpickle  # type: ignore
-from typing import Optional
+import jsonpickle
 
 Time = int
 Symbol = str
@@ -28,7 +27,8 @@ class ConversionObservation:
         self.transportFees = transportFees
         self.exportTariff = exportTariff
         self.importTariff = importTariff
-        self.sunlightIndex = sunlight
+        self.sugarPrice = sugarPrice
+        self.sunlightIndex = sunlightIndex
 
 
 class Observation:
@@ -64,7 +64,7 @@ class OrderDepth:
 
 class Trade:
 
-    def __init__(self, symbol: Symbol, price: int, quantity: int, buyer: Optional[UserId] = None, seller: Optional[UserId] = None, timestamp: int=0) -> None:
+    def __init__(self, symbol: Symbol, price: int, quantity: int, buyer: UserId=None, seller: UserId=None, timestamp: int=0) -> None:
         self.symbol = symbol
         self.price: int = price
         self.quantity: int = quantity
@@ -73,9 +73,10 @@ class Trade:
         self.timestamp = timestamp
 
     def __str__(self) -> str:
-        return f"({self.symbol}, {self.buyer} << {self.seller}, {self.price}, {self.quantity}, {self.timestamp})"
+        return "(" + self.symbol + ", " + self.buyer + " << " + self.seller + ", " + str(self.price) + ", " + str(self.quantity) + ", " + str(self.timestamp) + ")"
+
     def __repr__(self) -> str:
-        return f"({self.symbol}, {self.buyer} << {self.seller}, {self.price}, {self.quantity}, {self.timestamp})"
+        return "(" + self.symbol + ", " + self.buyer + " << " + self.seller + ", " + str(self.price) + ", " + str(self.quantity) + ", " + str(self.timestamp) + ")"
 
 
 class TradingState(object):
