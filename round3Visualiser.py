@@ -17,7 +17,8 @@ from plotly.subplots import make_subplots
 
 
 REPO_ROOT = Path(__file__).resolve().parent
-DEFAULT_DATA_DIR = REPO_ROOT / "data" / "ROUND_3"
+DATA_ROOT = REPO_ROOT / "data"
+DEFAULT_BUNDLED_DATASET = "ROUND_4" if (DATA_ROOT / "ROUND_4").exists() else "ROUND_3"
 DEFAULT_UNDERLYING = "VELVETFRUIT_EXTRACT"
 DEFAULT_PAIR_LEFT = "VELVETFRUIT_EXTRACT"
 DEFAULT_PAIR_RIGHT = "HYDROGEL_PACK"
@@ -34,7 +35,7 @@ OPTION_PATTERN = re.compile(r"VEV_(\d+)$")
 NORMAL = NormalDist(mu=0.0, sigma=1.0)
 
 
-st.set_page_config(page_title="Round 3 Visualiser", layout="wide")
+st.set_page_config(page_title="Market Visualiser", layout="wide")
 
 
 @dataclass(frozen=True)
@@ -87,16 +88,29 @@ def parse_day_hint(filename: str | None) -> int | None:
 
 
 @st.cache_data(show_spinner=False)
-def load_default_csvs(kind: str) -> tuple[pd.DataFrame, ...]:
-    pattern = f"{kind}_round_3_day_*.csv"
-    return tuple(pd.read_csv(path, sep=";") for path in sorted(DEFAULT_DATA_DIR.glob(pattern)))
+def list_bundled_datasets() -> tuple[str, ...]:
+    datasets = sorted(path.name for path in DATA_ROOT.glob("ROUND_*") if path.is_dir())
+    if not datasets:
+        raise ValueError(f"No bundled ROUND_* datasets were found in `{DATA_ROOT}`.")
+    return tuple(datasets)
 
 
 @st.cache_data(show_spinner=False)
-def load_round3_data(
+def load_default_csvs(kind: str, dataset_name: str) -> tuple[pd.DataFrame, ...]:
+    data_dir = DATA_ROOT / dataset_name
+    paths = sorted(data_dir.glob(f"{kind}_*.csv"))
+    if not paths:
+        raise ValueError(f"No `{kind}` CSV files were found in `{data_dir}`.")
+    return tuple(pd.read_csv(path, sep=";") for path in paths)
+
+
+@st.cache_data(show_spinner=False)
+def load_market_data(
     price_payloads: tuple[tuple[str, bytes], ...],
     trade_payloads: tuple[tuple[str, bytes], ...],
+    dataset_name: str,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
+    data_dir = DATA_ROOT / dataset_name
     if price_payloads:
         price_frames = []
         for filename, payload in price_payloads:
@@ -105,7 +119,7 @@ def load_round3_data(
             price_frames.append(frame)
     else:
         price_frames = []
-        for path in sorted(DEFAULT_DATA_DIR.glob("prices_round_3_day_*.csv")):
+        for path in sorted(data_dir.glob("prices_*.csv")):
             frame = pd.read_csv(path, sep=";")
             frame["source_file"] = path.name
             price_frames.append(frame)
@@ -118,7 +132,7 @@ def load_round3_data(
             trade_frames.append(frame)
     else:
         trade_frames = []
-        for path in sorted(DEFAULT_DATA_DIR.glob("trades_round_3_day_*.csv")):
+        for path in sorted(data_dir.glob("trades_*.csv")):
             frame = pd.read_csv(path, sep=";")
             frame["source_file"] = path.name
             trade_frames.append(frame)
@@ -200,6 +214,11 @@ def prepare_trades_table(trade_frames: list[pd.DataFrame], prices: pd.DataFrame)
                 raise ValueError(f"Trades CSV must contain a `{column}` column.")
             df[column] = pd.to_numeric(df[column], errors="coerce")
 
+        for column in ["buyer", "seller", "currency"]:
+            if column not in df.columns:
+                df[column] = ""
+            df[column] = df[column].where(df[column].notna(), "").astype(str).str.strip()
+
         df["symbol"] = df["symbol"].astype(str)
         df["source_file"] = source_name
         prepared_frames.append(df)
@@ -225,6 +244,8 @@ def prepare_trades_table(trade_frames: list[pd.DataFrame], prices: pd.DataFrame)
     trades = trades.sort_values(["day", "timestamp", "symbol"]).reset_index(drop=True)
     trades["global_ts"] = (trades["day"] - prices["day"].min()) * 1_000_000 + trades["timestamp"]
     trades["notional"] = trades["price"] * trades["quantity"]
+    trades["buyer_display"] = trades["buyer"].replace("", "Unknown buyer")
+    trades["seller_display"] = trades["seller"].replace("", "Unknown seller")
     return trades
 
 
@@ -246,6 +267,10 @@ def get_trade_view(trades: pd.DataFrame, product: str) -> pd.DataFrame:
     if trades.empty:
         return trades.copy()
     return trades.loc[trades["symbol"] == product].copy().sort_values(["day", "timestamp"]).reset_index(drop=True)
+
+
+def build_trade_hover_customdata(trades: pd.DataFrame) -> np.ndarray:
+    return trades[["day", "timestamp", "quantity", "notional", "buyer_display", "seller_display"]].to_numpy()
 
 
 def normalize_series(series: pd.Series) -> pd.Series:
@@ -584,6 +609,16 @@ def build_product_dashboard(prices: pd.DataFrame, trades: pd.DataFrame, product:
                 mode="markers",
                 name="Trades",
                 marker={"size": np.clip(product_trades["quantity"].fillna(0) * 1.5, 6, 18), "opacity": 0.45, "color": "black"},
+                customdata=build_trade_hover_customdata(product_trades),
+                hovertemplate=(
+                    "Day %{customdata[0]}<br>"
+                    "Timestamp %{customdata[1]}<br>"
+                    "Trade price %{y:.2f}<br>"
+                    "Quantity %{customdata[2]:.0f}<br>"
+                    "Notional %{customdata[3]:.2f}<br>"
+                    "Buyer %{customdata[4]}<br>"
+                    "Seller %{customdata[5]}<extra></extra>"
+                ),
             ),
             row=1,
             col=1,
@@ -694,6 +729,201 @@ def build_trade_context(prices: pd.DataFrame, trades: pd.DataFrame) -> pd.DataFr
     return context
 
 
+@st.cache_data(show_spinner=False)
+def build_trader_position_ledger(prices: pd.DataFrame, trades: pd.DataFrame, product: str) -> pd.DataFrame:
+    product_prices = get_product_view(prices, product)[["global_ts", "mid_price"]].sort_values("global_ts")
+    product_trades = get_trade_view(trades, product)
+
+    if product_trades.empty:
+        return pd.DataFrame(
+            columns=[
+                "global_ts",
+                "day",
+                "timestamp",
+                "trader",
+                "side",
+                "price",
+                "quantity",
+                "signed_quantity",
+                "cash_flow",
+                "mark_price",
+                "position",
+                "inventory_mtm",
+                "total_pnl",
+            ]
+        )
+
+    buyer_legs = product_trades.loc[product_trades["buyer"].ne("")].copy()
+    buyer_legs["trader"] = buyer_legs["buyer"]
+    buyer_legs["side"] = "Buy"
+    buyer_legs["signed_quantity"] = buyer_legs["quantity"]
+    buyer_legs["cash_flow"] = -buyer_legs["notional"]
+
+    seller_legs = product_trades.loc[product_trades["seller"].ne("")].copy()
+    seller_legs["trader"] = seller_legs["seller"]
+    seller_legs["side"] = "Sell"
+    seller_legs["signed_quantity"] = -seller_legs["quantity"]
+    seller_legs["cash_flow"] = seller_legs["notional"]
+
+    ledger = pd.concat([buyer_legs, seller_legs], ignore_index=True)
+    if ledger.empty:
+        return pd.DataFrame(
+            columns=[
+                "global_ts",
+                "day",
+                "timestamp",
+                "trader",
+                "side",
+                "price",
+                "quantity",
+                "signed_quantity",
+                "cash_flow",
+                "mark_price",
+                "position",
+                "inventory_mtm",
+                "total_pnl",
+            ]
+        )
+
+    ledger = ledger.sort_values(["global_ts", "trader", "side"]).reset_index(drop=True)
+    ledger = pd.merge_asof(
+        ledger,
+        product_prices.rename(columns={"mid_price": "mark_price"}).dropna(subset=["mark_price"]),
+        on="global_ts",
+        direction="backward",
+    )
+    ledger["mark_price"] = ledger["mark_price"].where(ledger["mark_price"].notna(), ledger["price"])
+    ledger["position"] = ledger.groupby("trader")["signed_quantity"].cumsum()
+    ledger["inventory_mtm"] = ledger["position"] * ledger["mark_price"]
+    ledger["total_pnl"] = ledger.groupby("trader")["cash_flow"].cumsum() + ledger["inventory_mtm"]
+    return ledger[
+        [
+            "global_ts",
+            "day",
+            "timestamp",
+            "trader",
+            "side",
+            "price",
+            "quantity",
+            "signed_quantity",
+            "cash_flow",
+            "mark_price",
+            "position",
+            "inventory_mtm",
+            "total_pnl",
+        ]
+    ]
+
+
+@st.cache_data(show_spinner=False)
+def build_trader_pnl_summary(prices: pd.DataFrame, trades: pd.DataFrame, product: str) -> pd.DataFrame:
+    ledger = build_trader_position_ledger(prices, trades, product)
+    if ledger.empty:
+        return pd.DataFrame(
+            columns=[
+                "trader",
+                "trade_count",
+                "buy_quantity",
+                "sell_quantity",
+                "buy_vwap",
+                "sell_vwap",
+                "net_position",
+                "cash_flow",
+                "mark_price",
+                "inventory_mtm",
+                "total_pnl",
+            ]
+        )
+
+    rows: list[dict[str, Any]] = []
+    for trader, trader_ledger in ledger.groupby("trader", sort=True):
+        buys = trader_ledger.loc[trader_ledger["signed_quantity"] > 0]
+        sells = trader_ledger.loc[trader_ledger["signed_quantity"] < 0]
+
+        buy_quantity = float(buys["signed_quantity"].sum())
+        sell_quantity = float((-sells["signed_quantity"]).sum())
+        buy_vwap = (buys["price"] * buys["signed_quantity"]).sum() / buy_quantity if buy_quantity else np.nan
+        sell_vwap = (sells["price"] * (-sells["signed_quantity"])).sum() / sell_quantity if sell_quantity else np.nan
+        last_row = trader_ledger.iloc[-1]
+
+        rows.append(
+            {
+                "trader": trader,
+                "trade_count": int(len(trader_ledger)),
+                "buy_quantity": buy_quantity,
+                "sell_quantity": sell_quantity,
+                "buy_vwap": buy_vwap,
+                "sell_vwap": sell_vwap,
+                "net_position": float(last_row["position"]),
+                "cash_flow": float(trader_ledger["cash_flow"].sum()),
+                "mark_price": float(last_row["mark_price"]),
+                "inventory_mtm": float(last_row["inventory_mtm"]),
+                "total_pnl": float(last_row["total_pnl"]),
+            }
+        )
+
+    summary = pd.DataFrame(rows)
+    return summary.sort_values(["total_pnl", "trade_count"], ascending=[False, False]).reset_index(drop=True)
+
+
+def build_trader_pnl_bar_chart(summary: pd.DataFrame, product: str) -> go.Figure:
+    fig = go.Figure()
+    if summary.empty:
+        return fig
+
+    colors = np.where(summary["total_pnl"] >= 0, "#2ca02c", "#d62728")
+    fig.add_trace(
+        go.Bar(
+            x=summary["trader"],
+            y=summary["total_pnl"],
+            marker={"color": colors},
+            customdata=summary[["net_position", "trade_count", "mark_price"]].to_numpy(),
+            hovertemplate=(
+                "Trader %{x}<br>"
+                "Total PnL %{y:.2f}<br>"
+                "Net position %{customdata[0]:.0f}<br>"
+                "Trade count %{customdata[1]:.0f}<br>"
+                "Mark price %{customdata[2]:.2f}<extra></extra>"
+            ),
+        )
+    )
+    fig.update_layout(**base_layout(f"Trader PnL: {pretty_symbol(product)}", 420))
+    fig.update_xaxes(title_text="Trader")
+    fig.update_yaxes(title_text="PnL")
+    return fig
+
+
+def build_trader_pnl_timeseries(ledger: pd.DataFrame, trader: str, product: str) -> go.Figure:
+    fig = go.Figure()
+    trader_ledger = ledger.loc[ledger["trader"] == trader].copy()
+    if trader_ledger.empty:
+        return fig
+
+    fig.add_trace(
+        go.Scatter(
+            x=trader_ledger["global_ts"],
+            y=trader_ledger["total_pnl"],
+            mode="lines+markers",
+            name="Total PnL",
+            line={"width": 2.2, "color": "#1f77b4"},
+            customdata=trader_ledger[["day", "timestamp", "side", "price", "quantity", "position"]].to_numpy(),
+            hovertemplate=(
+                "Day %{customdata[0]}<br>"
+                "Timestamp %{customdata[1]}<br>"
+                "Side %{customdata[2]}<br>"
+                "Trade price %{customdata[3]:.2f}<br>"
+                "Trade qty %{customdata[4]:.0f}<br>"
+                "Position %{customdata[5]:.0f}<br>"
+                "PnL %{y:.2f}<extra></extra>"
+            ),
+        )
+    )
+    fig.update_layout(**base_layout(f"{trader} PnL Path: {pretty_symbol(product)}", 420))
+    fig.update_xaxes(title_text="Synthetic round timeline")
+    fig.update_yaxes(title_text="PnL")
+    return fig
+
+
 def build_overlay_figure(
     prices: pd.DataFrame,
     trades: pd.DataFrame,
@@ -737,6 +967,17 @@ def build_overlay_figure(
                         mode="markers",
                         name=f"{pretty_symbol(symbol)} trades",
                         marker={"size": 7, "color": color, "opacity": 0.3},
+                        customdata=build_trade_hover_customdata(product_trades),
+                        hovertemplate=(
+                            "Product "
+                            + pretty_symbol(symbol)
+                            + "<br>Day %{customdata[0]}<br>"
+                            "Timestamp %{customdata[1]}<br>"
+                            "Trade price %{y:.2f}<br>"
+                            "Quantity %{customdata[2]:.0f}<br>"
+                            "Buyer %{customdata[4]}<br>"
+                            "Seller %{customdata[5]}<extra></extra>"
+                        ),
                     )
                 )
 
@@ -916,40 +1157,48 @@ def build_pair_ranking_table(prices: pd.DataFrame, symbols: tuple[str, ...]) -> 
 
 
 def render_header() -> None:
-    st.title("Round 3 Market Visualiser")
+    st.title("Prosperity Market Visualiser")
     st.caption(
-        "Upload Round 3 `prices` and `trades` CSVs, compare any two products on one chart, inspect voucher mispricings against Velvetfruit Extract, and screen for pairs / residual-stationarity opportunities."
+        "Inspect bundled or uploaded Prosperity `prices` and `trades` CSVs, compare products, inspect voucher mispricings against Velvetfruit Extract, and review per-trader PnL on named-counterparty rounds."
     )
 
 
 def render_inputs() -> tuple[pd.DataFrame, pd.DataFrame]:
-    default_prices = load_default_csvs("prices")
-    default_trades = load_default_csvs("trades")
+    bundled_datasets = list_bundled_datasets()
 
     with st.sidebar:
         st.header("Data")
+        dataset_name = st.selectbox(
+            "Bundled dataset",
+            bundled_datasets,
+            index=bundled_datasets.index(DEFAULT_BUNDLED_DATASET) if DEFAULT_BUNDLED_DATASET in bundled_datasets else 0,
+            help="Used when you do not upload files manually.",
+        )
         price_uploads = st.file_uploader(
             "Drop one or more `prices` CSVs",
             type=["csv"],
             accept_multiple_files=True,
-            help="If empty, the app uses the bundled Round 3 price files.",
+            help="If empty, the app uses the selected bundled price files.",
         )
         trade_uploads = st.file_uploader(
             "Drop one or more `trades` CSVs",
             type=["csv"],
             accept_multiple_files=True,
-            help="If empty, the app uses the bundled Round 3 trade files.",
+            help="If empty, the app uses the selected bundled trade files.",
         )
 
     price_payloads = tuple((uploaded.name, uploaded.getvalue()) for uploaded in price_uploads) if price_uploads else tuple()
     trade_payloads = tuple((uploaded.name, uploaded.getvalue()) for uploaded in trade_uploads) if trade_uploads else tuple()
 
-    prices, trades = load_round3_data(price_payloads, trade_payloads)
+    prices, trades = load_market_data(price_payloads, trade_payloads, dataset_name)
 
     with st.sidebar:
+        default_prices = load_default_csvs("prices", dataset_name)
+        default_trades = load_default_csvs("trades", dataset_name)
         price_count = len(price_payloads) if price_payloads else len(default_prices)
         trade_count = len(trade_payloads) if trade_payloads else len(default_trades)
-        st.info(f"Loaded {price_count} price file(s) and {trade_count} trade file(s).")
+        data_source = "uploaded files" if price_payloads or trade_payloads else dataset_name
+        st.info(f"Loaded {price_count} price file(s) and {trade_count} trade file(s) from {data_source}.")
 
     return prices, trades
 
@@ -1012,8 +1261,8 @@ def main() -> None:
 
     render_metric_cards(prices, trades, option_analytics)
 
-    product_tab, compare_tab, options_tab, pairs_tab, tables_tab = st.tabs(
-        ["Product View", "Compare Products", "Options", "Pairs / Cointegration", "Data Tables"]
+    product_tab, trader_tab, compare_tab, options_tab, pairs_tab, tables_tab = st.tabs(
+        ["Product View", "Trader PnL", "Compare Products", "Options", "Pairs / Cointegration", "Data Tables"]
     )
 
     with product_tab:
@@ -1045,10 +1294,49 @@ def main() -> None:
             right.info("No trades loaded for this product.")
         else:
             right.dataframe(
-                product_trades[["day", "timestamp", "price", "quantity", "notional"]]
+                product_trades[["day", "timestamp", "price", "quantity", "notional", "buyer_display", "seller_display"]]
                 .sort_values(["quantity", "notional"], ascending=[False, False])
                 .head(15)
                 .round(3),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    with trader_tab:
+        default_product_index = products.index(DEFAULT_UNDERLYING) if DEFAULT_UNDERLYING in products else 0
+        trader_product = st.selectbox("Product for trader PnL", products, index=default_product_index, key="trader_product")
+        trader_summary = build_trader_pnl_summary(prices, trades, trader_product)
+        trader_ledger = build_trader_position_ledger(prices, trades, trader_product)
+
+        if trader_summary.empty:
+            st.info("No named traders were found for this product in the loaded trade data.")
+        else:
+            cols = st.columns(4)
+            cols[0].metric("Named traders", f"{len(trader_summary)}")
+            cols[1].metric("Best PnL", f"{trader_summary['total_pnl'].max():.2f}")
+            cols[2].metric("Worst PnL", f"{trader_summary['total_pnl'].min():.2f}")
+            cols[3].metric("Latest mark", f"{trader_summary['mark_price'].iloc[0]:.2f}")
+
+            st.caption(
+                "PnL is computed as net cash flow from fills plus remaining inventory marked to the latest available quoted mid for the selected product."
+            )
+            st.plotly_chart(build_trader_pnl_bar_chart(trader_summary, trader_product), use_container_width=True, config=PLOTLY_CONFIG)
+
+            selected_trader = st.selectbox("Trader to inspect", trader_summary["trader"].tolist(), key="selected_trader")
+            st.plotly_chart(
+                build_trader_pnl_timeseries(trader_ledger, selected_trader, trader_product),
+                use_container_width=True,
+                config=PLOTLY_CONFIG,
+            )
+
+            left, right = st.columns(2)
+            left.subheader("Trader PnL Table")
+            left.dataframe(trader_summary.round(4), use_container_width=True, hide_index=True)
+            right.subheader(f"{selected_trader} Trade Ledger")
+            right.dataframe(
+                trader_ledger.loc[trader_ledger["trader"] == selected_trader][
+                    ["day", "timestamp", "side", "price", "quantity", "signed_quantity", "position", "mark_price", "total_pnl"]
+                ].round(4),
                 use_container_width=True,
                 hide_index=True,
             )
@@ -1186,9 +1474,9 @@ def main() -> None:
 
         if not trades.empty:
             st.subheader("Largest Trades Across All Products")
-            largest_trades = trades[["day", "timestamp", "symbol", "price", "quantity", "notional", "source_file"]].sort_values(
-                ["quantity", "notional"], ascending=[False, False]
-            )
+            largest_trades = trades[
+                ["day", "timestamp", "symbol", "price", "quantity", "notional", "buyer_display", "seller_display", "source_file"]
+            ].sort_values(["quantity", "notional"], ascending=[False, False])
             st.dataframe(largest_trades.head(30).round(4), use_container_width=True, hide_index=True)
         else:
             st.info("No trades are loaded.")
